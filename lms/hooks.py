@@ -127,6 +127,20 @@ doc_events = {
 		"validate": "lms.lms.user.validate_username_duplicates",
 		"after_insert": "lms.lms.user.after_insert",
 	},
+	"LMS Course": {
+		"on_update": "lms.quiz_generator.handler.handle_course_update",
+	},
+	"Course Lesson": {
+		"after_insert": "lms.quiz_generator.handler.handle_new_lesson",
+		"on_update": "lms.quiz_generator.handler.handle_lesson_update",
+	},
+	"Lesson Reference": {
+		"after_insert": "lms.quiz_generator.handler.handle_lesson_reference_insert",
+	},
+	"File": {
+		"after_insert": "lms.quiz_generator.handler.handle_file_upload",
+	},
+
 }
 
 # Scheduled Tasks
@@ -148,6 +162,12 @@ scheduler_events = {
 		"lms.lms.doctype.lms_live_class.lms_live_class.send_live_class_reminder",
 		"lms.lms.doctype.lms_course.lms_course.send_notification_for_published_courses",
 	],
+	"cron": {
+		"*/5 * * * *": [
+			"lms.quiz_generator.handler.process_pending_lessons",
+		],
+	},
+
 }
 
 fixtures = ["Custom Field", "Function", "Industry", "LMS Category"]

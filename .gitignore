@@ -15,3 +15,5 @@ lms/www/lms.html
 lms/www/_lms.html
 frappe-ui
 frappe-semgrep-rules
+# Local backups from editing
+*.pre_quiz_generator.bak

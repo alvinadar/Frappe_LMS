@@ -16,6 +16,18 @@ dependencies = [
     "cairocffi==1.5.1",
     "razorpay~=1.4.1",
     "fuzzywuzzy~=0.18.0",
+	# quiz_generator dependencies
+	"google-generativeai",
+	"PyPDF2",
+	"langchain",
+	"langchain-core",
+	"langchain-google-genai",
+	"langchain-huggingface",
+	"langchain-text-splitters",
+	"mcp",
+	"chromadb",
+	"sentence-transformers",
+
 ]
 
 [build-system]
