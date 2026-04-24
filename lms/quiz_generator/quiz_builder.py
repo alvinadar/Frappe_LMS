@@ -61,9 +61,48 @@ def _create_lms_question(q_data):
 
 
 def _link_quiz_to_lesson(lesson_name, quiz_name):
+    """Link a quiz to a lesson.
+
+    Writes to both:
+      1. lesson.quiz_id (legacy field, harmless fallback)
+      2. lesson.content JSON blocks (the frontend actually reads this for rich lessons)
+    """
+    import json
     try:
         lesson = frappe.get_doc("Course Lesson", lesson_name)
+
+        # Legacy field — keep for backwards compatibility
         lesson.quiz_id = quiz_name
+
+        # Parse content JSON (shape: {"blocks": [...], "time": ..., "version": ...})
+        if lesson.content:
+            try:
+                content_data = json.loads(lesson.content)
+            except Exception:
+                content_data = {"blocks": []}
+        else:
+            content_data = {"blocks": []}
+
+        if not isinstance(content_data, dict):
+            content_data = {"blocks": []}
+        if "blocks" not in content_data or not isinstance(content_data["blocks"], list):
+            content_data["blocks"] = []
+
+        # Idempotency: skip if a quiz block for this quiz already exists
+        already_linked = any(
+            (b or {}).get("type") == "quiz"
+            and ((b or {}).get("data") or {}).get("quiz") == quiz_name
+            for b in content_data["blocks"]
+        )
+
+        if not already_linked:
+            content_data["blocks"].append({
+                "id": f"quiz-{quiz_name[:20]}",
+                "type": "quiz",
+                "data": {"quiz": quiz_name},
+            })
+
+        lesson.content = json.dumps(content_data)
         lesson.save(ignore_permissions=True)
         frappe.db.commit()
     except Exception:
