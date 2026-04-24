@@ -325,3 +325,94 @@ def process_pending_lessons():
             regenerate_quiz_for_lesson(lesson["name"], lesson["course"])
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"[GeminiQuiz] Failed for {lesson['name']}")
+
+@frappe.whitelist()
+def backfill_quiz_blocks():
+    """One-time retroactive patch: for every lesson that has quiz_id set but no
+    corresponding {"type":"quiz"} block in its content JSON, add the block.
+
+    Safe to run multiple times (idempotent). Does NOT call Gemini.
+    Intended to be invoked once via /api/method after deploying the
+    embed-quiz-as-content-block fix.
+
+    Returns a summary dict so the admin can see what changed.
+    """
+    import json
+
+    if not frappe.has_permission("Course Lesson", "write"):
+        frappe.throw("You need write access to Course Lesson to run this.")
+
+    lessons = frappe.get_all(
+        "Course Lesson",
+        filters={"quiz_id": ["is", "set"]},
+        fields=["name", "title", "quiz_id", "content"],
+    )
+
+    patched = []
+    skipped_already_linked = []
+    skipped_no_quiz = []
+    errors = []
+
+    for row in lessons:
+        try:
+            quiz_name = row.get("quiz_id")
+            if not quiz_name:
+                skipped_no_quiz.append(row["name"])
+                continue
+
+            raw_content = row.get("content") or ""
+            if raw_content.strip():
+                try:
+                    content_data = json.loads(raw_content)
+                except Exception:
+                    content_data = {"blocks": []}
+            else:
+                content_data = {"blocks": []}
+
+            if not isinstance(content_data, dict):
+                content_data = {"blocks": []}
+            if "blocks" not in content_data or not isinstance(content_data["blocks"], list):
+                content_data["blocks"] = []
+
+            already_linked = any(
+                (b or {}).get("type") == "quiz"
+                and ((b or {}).get("data") or {}).get("quiz") == quiz_name
+                for b in content_data["blocks"]
+            )
+
+            if already_linked:
+                skipped_already_linked.append(row["name"])
+                continue
+
+            content_data["blocks"].append({
+                "id": f"quiz-{quiz_name[:20]}",
+                "type": "quiz",
+                "data": {"quiz": quiz_name},
+            })
+
+            frappe.db.set_value(
+                "Course Lesson",
+                row["name"],
+                "content",
+                json.dumps(content_data),
+                update_modified=False,
+            )
+            patched.append({"lesson": row["name"], "quiz": quiz_name})
+        except Exception as e:
+            errors.append({"lesson": row.get("name"), "error": str(e)})
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"[GeminiQuiz Backfill] Failed on lesson '{row.get('name')}'",
+            )
+
+    frappe.db.commit()
+
+    return {
+        "total_lessons_with_quiz_id": len(lessons),
+        "patched": patched,
+        "patched_count": len(patched),
+        "already_linked_count": len(skipped_already_linked),
+        "no_quiz_count": len(skipped_no_quiz),
+        "errors": errors,
+    }
+
