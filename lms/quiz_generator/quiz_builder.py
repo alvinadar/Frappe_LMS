@@ -4,17 +4,12 @@ import frappe
 def create_quiz_for_lesson(course_name, lesson_name, lesson_title, chapter_title, questions):
     quiz_title = _build_quiz_title(lesson_title, chapter_title)
 
-    # FIX: Find and delete any existing quiz with this exact title to prevent UniqueValidationError
-    existing_quiz = frappe.db.exists("LMS Quiz", {"title": quiz_title})
-    if existing_quiz:
-        frappe.delete_doc("LMS Quiz", existing_quiz, ignore_permissions=True)
-        frappe.db.commit()
-
+    # SAFETY: Build the new quiz fully BEFORE deleting any existing one,
+    # so a generation failure cannot leave the lesson pointing to nothing.
     quiz = frappe.new_doc("LMS Quiz")
     quiz.title = quiz_title
     quiz.passing_percentage = 60
     quiz.max_attempts = 3
-
     for q_data in questions:
         lms_question = _create_lms_question(q_data)
         if lms_question:
@@ -25,11 +20,21 @@ def create_quiz_for_lesson(course_name, lesson_name, lesson_title, chapter_title
                 "marks": 1,
             })
 
+    if not quiz.questions:
+        frappe.log_error(
+            f"[GeminiQuiz] Aborting regen for {lesson_name}: zero valid questions built."
+        )
+        return None
+
+    # Only NOW remove the old quiz, immediately before inserting the replacement.
+    existing_quiz = frappe.db.exists("LMS Quiz", {"title": quiz_title})
+    if existing_quiz:
+        frappe.delete_doc("LMS Quiz", existing_quiz, ignore_permissions=True)
+        frappe.db.commit()
+
     quiz.insert(ignore_permissions=True, ignore_if_duplicate=True)
     frappe.db.commit()
-
     _link_quiz_to_lesson(lesson_name, quiz.name)
-
     return quiz.name
 
 
