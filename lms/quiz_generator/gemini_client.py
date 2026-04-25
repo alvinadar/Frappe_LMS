@@ -85,29 +85,55 @@ def generate_questions_with_rag(lesson_title, num_questions=5):
     # Combine prompt and LLM into a chain
     chain = prompt | llm
 
-    # 4. Generate with Retry Logic
+    # 4. Generate (single attempt + JSON-failure retry, no sleep on rate limit)
     for attempt in range(1, MAX_RETRIES + 1):
+        # Circuit breaker: bail out fast if we recently hit a global rate limit
+        if frappe.cache.get_value("gemini_rate_limited_until"):
+            frappe.logger().warning(
+                "[RAG] Skipping Gemini call: circuit breaker active (recent 429)."
+            )
+            return None
+
         wait_for_rate_limit()
         try:
             response = chain.invoke({
                 "num_questions": num_questions,
                 "context": context_text
             })
-            
+
             questions = _parse_response(response.content)
             if questions:
                 return questions
-                
+
+            # Parsed empty/invalid: short backoff and retry (cheap retry,
+            # might be transient JSON formatting issue)
+            frappe.logger().warning(
+                f"[RAG] Attempt {attempt}: empty/invalid JSON. Retrying."
+            )
+            time.sleep(2)
+
         except Exception as e:
-            is_rate_limit = any(x in str(e).lower() for x in ['429', 'quota', 'exhausted'])
+            err = str(e).lower()
+            is_rate_limit = any(x in err for x in ['429', 'quota', 'exhausted', 'resource_exhausted'])
             if is_rate_limit:
-                 frappe.logger().warning(f"[RAG] Rate limit hit. Waiting 60s...")
-                 time.sleep(60)
+                # Set circuit breaker so other workers skip Gemini for 30 min.
+                # Quota issues do not get fixed by sleeping inside a worker.
+                frappe.cache.set_value(
+                    "gemini_rate_limited_until", 1, expires_in_sec=1800
+                )
+                frappe.logger().warning(
+                    f"[RAG] Rate limit hit for {lesson_title}. Circuit breaker set; cron will retry later."
+                )
+                return None
             else:
-                 frappe.logger().warning(f"[RAG] Generation attempt {attempt} failed: {e}")
-                 time.sleep(5)
-            
-    frappe.log_error(f'[RAG] Failed to generate valid questions for {lesson_title} after {MAX_RETRIES} attempts.')
+                frappe.logger().warning(
+                    f"[RAG] Generation attempt {attempt} failed (non-rate-limit): {e}"
+                )
+                time.sleep(2)
+
+    frappe.log_error(
+        f'[RAG] Failed to generate valid questions for {lesson_title} after {MAX_RETRIES} attempts.'
+    )
     return None
 
 def _parse_response(raw_text):

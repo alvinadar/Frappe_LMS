@@ -288,43 +288,74 @@ def handle_lesson_reference_insert(doc, method):
 
 
 def process_pending_lessons():
-    """
-    Runs every 30 minutes.
-    Finds all lessons without quizzes and generates them.
-    Clears stuck jobs from queue first.
-    """
-    import redis
-    from rq import Queue as RQueue
+    """Cron entry: generate quizzes for lessons that don't have one yet.
 
-    # Clear stuck jobs
-    try:
-        r = redis.from_url("redis://localhost:11000")
-        q = RQueue("Users-alvinash-frappe-bench:long", connection=r)
-        q.empty()
-        frappe.logger().info("[GeminiQuiz] Queue cleared by scheduler.")
-    except Exception:
-        pass
+    Quota-aware:
+      - Honors gemini_rate_limited_until circuit breaker
+      - Processes at most BATCH_LIMIT lessons per run
+      - Skips lessons that have failed MAX_LESSON_ATTEMPTS times
+    """
+    BATCH_LIMIT = 5
+    MAX_LESSON_ATTEMPTS = 3
 
-    # Find all lessons without quizzes
+    # Circuit breaker: if Gemini was 429'd recently, skip this entire run.
+    if frappe.cache.get_value("gemini_rate_limited_until"):
+        frappe.logger().info(
+            "[GeminiQuiz] Skipping run: Gemini circuit breaker active."
+        )
+        return
+
     lessons = frappe.get_all(
         "Course Lesson",
         fields=["name", "title", "course"],
         filters={"quiz_id": ["is", "not set"]},
     )
-
     if not lessons:
-        frappe.logger().info("[GeminiQuiz] No pending lessons found.")
         return
 
-    frappe.logger().info(f"[GeminiQuiz] Found {len(lessons)} lessons without quizzes.")
-
+    processed = 0
     for lesson in lessons:
+        if processed >= BATCH_LIMIT:
+            frappe.logger().info(
+                f"[GeminiQuiz] Reached batch limit ({BATCH_LIMIT}); next cron picks up the rest."
+            )
+            break
+
         if not lesson.get("course"):
             continue
+
+        # Per-lesson retry counter in cache (24h TTL, resets daily)
+        attempts_key = f"gemini_attempts:{lesson['name']}"
+        attempts = int(frappe.cache.get_value(attempts_key) or 0)
+        if attempts >= MAX_LESSON_ATTEMPTS:
+            frappe.logger().info(
+                f"[GeminiQuiz] Skipping {lesson['name']}: {attempts} attempts already."
+            )
+            continue
+
         try:
             regenerate_quiz_for_lesson(lesson["name"], lesson["course"])
+            processed += 1
+            # Success path: clear the counter so future regens start fresh
+            frappe.cache.set_value(attempts_key, 0, expires_in_sec=86400)
+
+            # If a circuit breaker got set DURING this lesson, stop the loop.
+            if frappe.cache.get_value("gemini_rate_limited_until"):
+                frappe.logger().info(
+                    "[GeminiQuiz] Circuit breaker tripped mid-run; stopping."
+                )
+                break
+
         except Exception:
-            frappe.log_error(frappe.get_traceback(), f"[GeminiQuiz] Failed for {lesson['name']}")
+            frappe.cache.set_value(
+                attempts_key, attempts + 1, expires_in_sec=86400
+            )
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"[GeminiQuiz] Failed for {lesson['name']} (attempt {attempts + 1})",
+            )
+
+
 
 @frappe.whitelist()
 def backfill_quiz_blocks():
