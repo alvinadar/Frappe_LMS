@@ -230,7 +230,10 @@ def get_lesson_details(chapter: dict, progress: bool = False):
 
 def get_lesson_icon(body: str, content: str):
 	if content:
-		content = json.loads(content)
+		try:
+			content = json.loads(content)
+		except (json.JSONDecodeError, TypeError):
+			return None
 
 		for block in content.get("blocks"):
 			if block.get("type") == "upload" and block.get("data").get("file_type").lower() in [
