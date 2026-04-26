@@ -447,3 +447,86 @@ def backfill_quiz_blocks():
         "errors": errors,
     }
 
+@frappe.whitelist()
+def clean_orphan_quiz_refs():
+    """One-time cleanup: for every lesson, remove quiz_id and content-block
+    quiz references that point to non-existent LMS Quiz records.
+
+    Bypasses doc validation by writing directly with frappe.db.set_value.
+    Use after a quiz wipeout to unstick lessons that won't save due to
+    'Invalid Quiz ID' validation.
+    """
+    import json
+
+    if not frappe.has_permission("Course Lesson", "write"):
+        frappe.throw("You need write access to Course Lesson.")
+
+    lessons = frappe.get_all(
+        "Course Lesson",
+        fields=["name", "quiz_id", "content"],
+    )
+
+    cleaned = []
+    skipped = []
+    errors = []
+
+    for row in lessons:
+        try:
+            modified = False
+            quiz_id = row.get("quiz_id")
+
+            # 1. Clear quiz_id if quiz no longer exists
+            if quiz_id and not frappe.db.exists("LMS Quiz", quiz_id):
+                frappe.db.set_value(
+                    "Course Lesson", row["name"], "quiz_id", "",
+                    update_modified=False,
+                )
+                modified = True
+
+            # 2. Strip orphan quiz blocks from content JSON
+            raw_content = row.get("content") or ""
+            if raw_content.strip():
+                try:
+                    content_data = json.loads(raw_content)
+                except Exception:
+                    content_data = None
+
+                if isinstance(content_data, dict) and isinstance(content_data.get("blocks"), list):
+                    original_count = len(content_data["blocks"])
+                    cleaned_blocks = []
+                    for block in content_data["blocks"]:
+                        if (block or {}).get("type") == "quiz":
+                            ref = ((block or {}).get("data") or {}).get("quiz")
+                            if ref and not frappe.db.exists("LMS Quiz", ref):
+                                continue  # drop orphan
+                        cleaned_blocks.append(block)
+                    if len(cleaned_blocks) != original_count:
+                        content_data["blocks"] = cleaned_blocks
+                        frappe.db.set_value(
+                            "Course Lesson", row["name"], "content",
+                            json.dumps(content_data),
+                            update_modified=False,
+                        )
+                        modified = True
+
+            if modified:
+                cleaned.append(row["name"])
+            else:
+                skipped.append(row["name"])
+
+        except Exception as e:
+            errors.append({"lesson": row.get("name"), "error": str(e)})
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"[GeminiQuiz Cleanup] Failed on lesson '{row.get('name')}'",
+            )
+
+    frappe.db.commit()
+
+    return {
+        "total": len(lessons),
+        "cleaned": cleaned,
+        "cleaned_count": len(cleaned),
+        "skipped_count": len(skipped),
+        "errors": errors,
+    }
