@@ -170,7 +170,11 @@ def handle_file_upload(doc, method):
         )
 
 
+@frappe.whitelist()
 def regenerate_quiz_for_lesson(lesson_name: str, course_name: str):
+    if not frappe.has_permission("Course Lesson", "write"):
+        frappe.throw("You need write access to Course Lesson.")
+
     from lms.quiz_generator.content_extractor import extract_course_content
     from lms.quiz_generator.vector_store import process_and_store_document
     from lms.quiz_generator.gemini_client import generate_questions_with_rag
@@ -187,11 +191,7 @@ def regenerate_quiz_for_lesson(lesson_name: str, course_name: str):
         
         if not lesson or len(lesson['content'].strip()) < 100:
             return
-            
-        existing_id = frappe.db.get_value('Course Lesson', lesson_name, 'quiz_id')
-        if existing_id and existing_id.startswith('ai-'):
-            frappe.delete_doc('LMS Quiz', existing_id, ignore_permissions=True)
-            frappe.db.commit()
+
 
         # 1. Build Metadata for ChromaDB
         metadata = {
