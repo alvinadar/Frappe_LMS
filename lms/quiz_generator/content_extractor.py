@@ -156,7 +156,16 @@ def _parse_editorjs(content: str):
     return "\n".join(texts), pdf_urls
 
 
-def _read_pdf_file(file_url: str) -> str:
+def _read_pdf_file(file_url: str, max_chars: int = 30000) -> str:
+    """Extract text from a PDF, capped at max_chars (default 30K) to keep
+    downstream LLM input within token limits.
+
+    Reads pages sequentially and stops once the cap is reached. This keeps
+    the start of the document (preface, intro, ToC) which is usually the
+    most representative for quiz generation. The full PDF stays on disk
+    for students to download/view; only the text fed into the RAG pipeline
+    is capped.
+    """
     try:
         from PyPDF2 import PdfReader
 
@@ -173,12 +182,22 @@ def _read_pdf_file(file_url: str) -> str:
 
         reader = PdfReader(file_path)
         pages_text = []
+        running_len = 0
         for page in reader.pages:
             text = page.extract_text()
-            if text:
-                pages_text.append(text.strip())
+            if not text:
+                continue
+            text = text.strip()
+            pages_text.append(text)
+            running_len += len(text) + 1  # +1 for the join newline
+            if running_len >= max_chars:
+                frappe.logger().info(
+                    f"[GeminiQuiz] PDF text capped at {max_chars} chars for {file_url}"
+                )
+                break
 
-        return "\n".join(pages_text)
+        result = "\n".join(pages_text)
+        return result[:max_chars]
 
     except Exception as e:
         frappe.logger().warning(f"[GeminiQuiz] Failed to read PDF {file_url}: {e}")
