@@ -175,59 +175,122 @@ def regenerate_quiz_for_lesson(lesson_name: str, course_name: str):
     if not frappe.has_permission("Course Lesson", "write"):
         frappe.throw("You need write access to Course Lesson.")
 
-    from lms.quiz_generator.content_extractor import extract_course_content
+    from lms.quiz_generator.content_extractor import extract_course_content, _extract_lesson_text
     from lms.quiz_generator.vector_store import process_and_store_document
     from lms.quiz_generator.gemini_client import generate_questions_with_rag
     from lms.quiz_generator.quiz_builder import create_quiz_for_lesson
 
+    MIN_CONTENT_CHARS = 50
+
+    frappe.log_error(
+        f"[REGEN START] lesson={lesson_name} course={course_name}",
+        "[GeminiQuiz REGEN]"
+    )
+
     lock_key = f'gemini_quiz_lock_{lesson_name}'
     if frappe.cache.get_value(lock_key):
-        return
+        frappe.log_error(
+            f"[REGEN SKIP] lock active for {lesson_name}",
+            "[GeminiQuiz REGEN]"
+        )
+        return {"status": "skipped", "reason": "lock_active"}
     frappe.cache.set_value(lock_key, 1, expires_in_sec=600)
 
     try:
+        # Try the chapter-walk path first
         lessons = extract_course_content(course_name)
         lesson = next((l for l in lessons if l['name'] == lesson_name), None)
-        
-        if not lesson or len(lesson['content'].strip()) < 100:
-            return
 
+        # Fallback: if chapter walk missed it, read the Course Lesson doc directly
+        if not lesson:
+            frappe.log_error(
+                f"[REGEN FALLBACK] {lesson_name} not in extract_course_content results. Reading directly.",
+                "[GeminiQuiz REGEN]"
+            )
+            try:
+                lesson_doc = frappe.get_doc("Course Lesson", lesson_name)
+                content = _extract_lesson_text(lesson_doc)
+                lesson = {
+                    "name": lesson_doc.name,
+                    "title": lesson_doc.title or lesson_doc.name,
+                    "chapter_title": "",
+                    "course_name": course_name,
+                    "content": content,
+                }
+            except Exception as e:
+                frappe.log_error(
+                    f"[REGEN FAIL] cannot load lesson {lesson_name}: {e}",
+                    "[GeminiQuiz REGEN]"
+                )
+                return {"status": "failed", "reason": "lesson_not_found"}
 
-        # 1. Build Metadata for ChromaDB
+        content_len = len(lesson['content'].strip())
+        frappe.log_error(
+            f"[REGEN CONTENT] {lesson_name}: {content_len} chars extracted",
+            "[GeminiQuiz REGEN]"
+        )
+
+        if content_len < MIN_CONTENT_CHARS:
+            return {"status": "skipped", "reason": "content_too_short", "chars": content_len}
+
         metadata = {
             "course_name": course_name,
             "chapter_title": lesson.get('chapter_title', ''),
             "lesson_title": lesson['title']
         }
 
-        # 2. Chunk and Store in Vector Database
         is_stored = process_and_store_document(
-            lesson_name=lesson_name, 
-            text_content=lesson['content'], 
+            lesson_name=lesson_name,
+            text_content=lesson['content'],
             metadata=metadata
         )
 
-        # 3. Trigger the RAG Quiz Generation
-        if is_stored:
-             frappe.logger().info(f'[GeminiQuiz] Vectors stored for {lesson_name}. Executing RAG.')
-             
-             questions = generate_questions_with_rag(
-                 lesson_title=lesson['title'], 
-                 num_questions=5
-             )
-             
-             if questions:
-                 quiz_name = create_quiz_for_lesson(
-                     course_name=course_name,
-                     lesson_name=lesson_name,
-                     lesson_title=lesson['title'],
-                     chapter_title=lesson.get('chapter_title', ''),
-                     questions=questions,
-                 )
-                 frappe.logger().info(f'[GeminiQuiz] Successfully created LMS Quiz: {quiz_name}')
+        if not is_stored:
+            frappe.log_error(
+                f"[REGEN FAIL] vector storage failed for {lesson_name}",
+                "[GeminiQuiz REGEN]"
+            )
+            return {"status": "failed", "reason": "vector_storage_failed"}
+
+        frappe.log_error(
+            f"[REGEN RAG] calling Gemini for {lesson_name}",
+            "[GeminiQuiz REGEN]"
+        )
+
+        questions = generate_questions_with_rag(
+            lesson_title=lesson['title'],
+            num_questions=5
+        )
+
+        if not questions:
+            frappe.log_error(
+                f"[REGEN FAIL] Gemini returned no valid questions for {lesson_name}",
+                "[GeminiQuiz REGEN]"
+            )
+            return {"status": "failed", "reason": "no_questions_generated"}
+
+        quiz_name = create_quiz_for_lesson(
+            course_name=course_name,
+            lesson_name=lesson_name,
+            lesson_title=lesson['title'],
+            chapter_title=lesson.get('chapter_title', ''),
+            questions=questions,
+        )
+
+        if not quiz_name:
+            return {"status": "failed", "reason": "quiz_builder_returned_none"}
+
+        frappe.log_error(
+            f"[REGEN SUCCESS] {lesson_name} -> {quiz_name}",
+            "[GeminiQuiz REGEN]"
+        )
+        return {"status": "success", "quiz_name": quiz_name, "questions_count": len(questions)}
 
     except Exception:
-        frappe.log_error(frappe.get_traceback(), f'[GeminiQuiz] Vectorization/RAG Failed: {lesson_name}')
+        frappe.log_error(frappe.get_traceback(), f'[GeminiQuiz REGEN] Exception: {lesson_name}')
+        return {"status": "exception"}
+    finally:
+        frappe.cache.delete_value(lock_key)
 
 
 def retry_failed_generations():
@@ -530,3 +593,56 @@ def clean_orphan_quiz_refs():
         "skipped_count": len(skipped),
         "errors": errors,
     }
+
+@frappe.whitelist()
+def diagnose_lesson(lesson_name: str, course_name: str):
+    """Returns everything regenerate_quiz_for_lesson would see, without calling Gemini."""
+    from lms.quiz_generator.content_extractor import extract_course_content, _extract_lesson_text
+
+    if not frappe.has_permission("Course Lesson", "write"):
+        frappe.throw("You need write access to Course Lesson.")
+
+    result = {
+        "lesson_name": lesson_name,
+        "course_name": course_name,
+    }
+
+    # Direct doc check
+    try:
+        lesson_doc = frappe.get_doc("Course Lesson", lesson_name)
+        result["doc_exists"] = True
+        result["doc_title"] = lesson_doc.title
+        result["doc_quiz_id"] = lesson_doc.quiz_id
+        result["doc_body_len"] = len(lesson_doc.body or "")
+        result["doc_content_len"] = len(lesson_doc.content or "")
+        try:
+            extracted = _extract_lesson_text(lesson_doc)
+            result["direct_extracted_len"] = len(extracted)
+            result["direct_extracted_preview"] = extracted[:300]
+        except Exception as e:
+            result["direct_extracted_error"] = str(e)
+    except Exception as e:
+        result["doc_exists"] = False
+        result["doc_error"] = str(e)
+
+    # Chapter-walk path
+    try:
+        lessons = extract_course_content(course_name)
+        result["course_walk_lesson_count"] = len(lessons)
+        result["course_walk_lesson_names"] = [l['name'] for l in lessons]
+        match = next((l for l in lessons if l['name'] == lesson_name), None)
+        if match:
+            result["course_walk_found"] = True
+            result["course_walk_content_len"] = len(match['content'])
+            result["course_walk_content_preview"] = match['content'][:300]
+        else:
+            result["course_walk_found"] = False
+    except Exception as e:
+        result["course_walk_error"] = str(e)
+
+    # Cache state
+    result["cache_lock_active"] = bool(frappe.cache.get_value(f'gemini_quiz_lock_{lesson_name}'))
+    result["cache_circuit_breaker"] = bool(frappe.cache.get_value("gemini_rate_limited_until"))
+    result["cache_attempts"] = frappe.cache.get_value(f"gemini_attempts:{lesson_name}")
+
+    return result
