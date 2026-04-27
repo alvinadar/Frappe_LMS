@@ -105,10 +105,11 @@ def generate_questions_with_rag(lesson_title, num_questions=5):
             if questions:
                 return questions
 
-            # Parsed empty/invalid: short backoff and retry (cheap retry,
-            # might be transient JSON formatting issue)
-            frappe.logger().warning(
-                f"[RAG] Attempt {attempt}: empty/invalid JSON. Retrying."
+            # Parsed empty/invalid: log raw response so we can see what Gemini said
+            raw = (response.content or '')[:800]
+            frappe.log_error(
+                f'Attempt {attempt} raw response: {raw}',
+                f'[RAG REJECTED] {lesson_title}'
             )
             time.sleep(2)
 
