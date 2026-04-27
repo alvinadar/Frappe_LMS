@@ -127,8 +127,9 @@ def generate_questions_with_rag(lesson_title, num_questions=5):
                 )
                 return None
             else:
-                frappe.logger().warning(
-                    f"[RAG] Generation attempt {attempt} failed (non-rate-limit): {e}"
+                frappe.log_error(
+                    f'Attempt {attempt} exception (non-rate-limit): {type(e).__name__}: {str(e)[:600]}',
+                    f'[RAG EXCEPTION] {lesson_title}'
                 )
                 time.sleep(2)
 
