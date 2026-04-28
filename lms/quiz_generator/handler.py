@@ -688,3 +688,83 @@ def test_gemini():
         import traceback
         result["traceback"] = traceback.format_exc()[:2000]
         return result
+    
+@frappe.whitelist()
+def test_rag_prompt():
+    """Run the full RAG prompt with a tiny test context. Returns raw output."""
+    if not frappe.has_permission("Course Lesson", "write"):
+        frappe.throw("Permission denied.")
+
+    result = {}
+
+    try:
+        from lms.quiz_generator.gemini_client import _get_api_key
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_core.prompts import PromptTemplate
+
+        api_key = _get_api_key()
+
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=api_key,
+            temperature=0.4,
+            max_output_tokens=2048,
+        )
+
+        template = """You are an expert instructional designer.
+    Based ONLY on the provided curriculum context, generate exactly {num_questions} multiple-choice questions.
+
+    RULES:
+    1. Each question must have exactly 4 answer options.
+    2. Exactly 1 option must be correct.
+    3. Provide a brief explanation for the correct answer.
+    4. Return ONLY valid JSON — no markdown, no code fences.
+
+    JSON FORMAT:
+    [
+        {{
+            "question": "Question text?",
+            "options": [
+                {{"text": "Option A", "is_correct": true, "explanation": "Why"}},
+                {{"text": "Option B", "is_correct": false, "explanation": ""}},
+                {{"text": "Option C", "is_correct": false, "explanation": ""}},
+                {{"text": "Option D", "is_correct": false, "explanation": ""}}
+            ]
+        }}
+    ]
+
+    CURRICULUM CONTEXT:
+    {context}
+
+    Return ONLY the JSON array."""
+
+        prompt = PromptTemplate(
+            input_variables=["num_questions", "context"],
+            template=template
+        )
+        chain = prompt | llm
+
+        sample_context = ("Machine learning is a subset of artificial intelligence "
+                          "that allows systems to learn from data. Common types are "
+                          "supervised, unsupervised, and reinforcement learning.")
+
+        response = chain.invoke({
+            "num_questions": 2,
+            "context": sample_context,
+        })
+
+        raw = str(response.content)
+        result["status"] = "success"
+        result["raw_output"] = raw[:3000]
+        result["raw_length"] = len(raw)
+        result["starts_with"] = raw[:30]
+        result["ends_with"] = raw[-30:] if len(raw) > 30 else raw
+        return result
+
+    except Exception as e:
+        import traceback
+        result["status"] = "exception"
+        result["exception_type"] = type(e).__name__
+        result["exception_message"] = str(e)[:1500]
+        result["traceback"] = traceback.format_exc()[:2500]
+        return result
