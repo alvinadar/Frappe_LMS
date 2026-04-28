@@ -43,7 +43,7 @@ def generate_questions_with_rag(lesson_title, num_questions=5):
 
     # 2. Setup LangChain LLM
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         google_api_key=api_key,
         temperature=0.4,
         max_output_tokens=2048,
