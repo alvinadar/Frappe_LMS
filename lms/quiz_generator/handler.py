@@ -646,3 +646,45 @@ def diagnose_lesson(lesson_name: str, course_name: str):
     result["cache_attempts"] = frappe.cache.get_value(f"gemini_attempts:{lesson_name}")
 
     return result
+
+@frappe.whitelist()
+def test_gemini():
+    """Direct, single-shot Gemini test. Returns whatever happens as JSON.
+    Bypasses RAG, parser, retries, content extraction.
+    """
+    if not frappe.has_permission("Course Lesson", "write"):
+        frappe.throw("Permission denied.")
+
+    result = {}
+
+    try:
+        from lms.quiz_generator.gemini_client import _get_api_key
+        api_key = _get_api_key()
+        result["api_key_present"] = bool(api_key)
+        result["api_key_suffix"] = api_key[-4:] if api_key else None
+    except Exception as e:
+        result["api_key_error"] = f"{type(e).__name__}: {e}"
+        return result
+
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=api_key,
+            temperature=0.4,
+            max_output_tokens=200,
+        )
+        response = llm.invoke("Say the word 'hello' and nothing else.")
+        result["status"] = "success"
+        result["response_type"] = type(response).__name__
+        result["response_content"] = str(response.content)[:500]
+        return result
+
+    except Exception as e:
+        result["status"] = "exception"
+        result["exception_type"] = type(e).__name__
+        result["exception_message"] = str(e)[:1500]
+        import traceback
+        result["traceback"] = traceback.format_exc()[:2000]
+        return result
