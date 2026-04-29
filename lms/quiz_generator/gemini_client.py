@@ -46,7 +46,7 @@ def generate_questions_with_rag(lesson_title, num_questions=5):
         model="gemini-2.5-flash",
         google_api_key=api_key,
         temperature=0.4,
-        max_output_tokens=2048,
+        max_output_tokens=8192,
     )
 
     # 3. Define the Prompt Template
