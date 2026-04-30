@@ -91,3 +91,4 @@ Homepage = "https://frappe.io/learning"
 Repository = "https://github.com/frappe/lms.git"
 "Bug Reports" = "https://github.com/frappe/lms/issues"
 
+ # adds a blank line
