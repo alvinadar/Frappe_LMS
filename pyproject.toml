@@ -22,11 +22,9 @@ dependencies = [
 	"langchain",
 	"langchain-core",
 	"langchain-google-genai",
-	"langchain-huggingface",
 	"langchain-text-splitters",
 	"mcp",
 	"chromadb",
-	"sentence-transformers",
 
 ]
 
