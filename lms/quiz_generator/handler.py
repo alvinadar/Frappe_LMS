@@ -93,7 +93,13 @@ def handle_new_lesson(doc, method):
             course_name = frappe.db.get_value("Course Chapter", chapter_ref, "course")
 
     if not course_name:
-        frappe.logger().info(f"[GeminiQuiz] Could not find course for lesson '{doc.name}'. Skipping.")
+        # Race condition: lesson created before chapter linkage complete.
+        # Enqueue a delayed retry; by then handle_lesson_reference_insert
+        # will have set up the chapter, OR the cron will catch it.
+        frappe.logger().info(
+            f"[GeminiQuiz] Course unknown for lesson '{doc.name}' at insert time. "
+            f"Cron will pick it up."
+        )
         return
 
     frappe.logger().info(f"[GeminiQuiz] New lesson '{doc.name}' detected. Enqueueing quiz generation.")
@@ -359,7 +365,7 @@ def process_pending_lessons():
       - Skips lessons that have failed MAX_LESSON_ATTEMPTS times
     """
     BATCH_LIMIT = 5
-    MAX_LESSON_ATTEMPTS = 3
+    MAX_LESSON_ATTEMPTS = 5  # raised from 3 - cron should be persistent
 
     # Circuit breaker: if Gemini was 429'd recently, skip this entire run.
     if frappe.cache.get_value("gemini_rate_limited_until"):
@@ -397,10 +403,17 @@ def process_pending_lessons():
             continue
 
         try:
-            regenerate_quiz_for_lesson(lesson["name"], lesson["course"])
+            result = regenerate_quiz_for_lesson(lesson["name"], lesson["course"])
             processed += 1
-            # Success path: clear the counter so future regens start fresh
+            # Reset this lesson's counter
             frappe.cache.set_value(attempts_key, 0, expires_in_sec=86400)
+            # If the regen actually produced a quiz, also reset all OTHER lessons'
+            # counters - quota proved good, so don't keep skipping siblings.
+            if isinstance(result, dict) and result.get("status") == "success":
+                for other in lessons:
+                    other_key = f"gemini_attempts:{other['name']}"
+                    if other['name'] != lesson['name']:
+                        frappe.cache.set_value(other_key, 0, expires_in_sec=86400)
 
             # If a circuit breaker got set DURING this lesson, stop the loop.
             if frappe.cache.get_value("gemini_rate_limited_until"):

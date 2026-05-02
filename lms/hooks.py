@@ -163,7 +163,7 @@ scheduler_events = {
 		"lms.lms.doctype.lms_course.lms_course.send_notification_for_published_courses",
 	],
 	"cron": {
-		"*/30 * * * *": [
+		"*/15 * * * *": [
 			"lms.quiz_generator.handler.process_pending_lessons",
 		],
 	},
